@@ -156,4 +156,5 @@ verify backend certificates. Consequences:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[0BSD](https://opensource.org/license/0bsd) (BSD Zero Clause License) — do anything,
+no conditions, no attribution required. See [LICENSE](LICENSE).
