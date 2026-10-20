@@ -1,0 +1,9 @@
+# Local, site-specific config (copy subwrap.example.ini -> subwrap.ini)
+subwrap.ini
+
+# Python
+__pycache__/
+*.pyc
+
+# Captured traffic / scratch
+*.har
