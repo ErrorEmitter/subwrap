@@ -33,6 +33,7 @@ import sys
 import ssl
 import gzip
 import zlib
+import errno
 import socket
 import select
 import threading
@@ -618,16 +619,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 class ThreadingHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows, SO_REUSEADDR lets a second server bind a port another one is already
+    # listening on: both start without error and Windows keeps handing connections to
+    # just one of them (e.g. a stale proxy left on :80 silently answers everything).
+    # So bind exclusively there; elsewhere SO_REUSEADDR only permits rebinding while
+    # old connections sit in TIME_WAIT, which is what we want for quick restarts.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class ThreadingHTTPServer6(ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
-def serve(addr):
+def make_server(addr):
     cls = ThreadingHTTPServer6 if ":" in addr else ThreadingHTTPServer
-    cls((addr, LISTEN_PORT), ProxyHandler).serve_forever()
+    return cls((addr, LISTEN_PORT), ProxyHandler)
 
 
 def main():
@@ -648,19 +659,32 @@ def main():
     if lan and not BASE.endswith(".localhost"):
         print("  NOTE: base is not *.localhost, so Service Workers won't register over plain HTTP"
               " (other layers still work).")
-    started = []
+    # Bind everything here, before any serving thread starts, so a failed bind is
+    # reported (and can stop us) instead of printing a bogus "listening" line.
+    servers, in_use = [], False
     for addr in BIND_ADDRS:
         label = f"[{addr}]" if ":" in addr else addr
         try:
-            t = threading.Thread(target=serve, args=(addr,), daemon=True)
-            t.start()
-            started.append(t)
-            print(f"  listening on {label}:{LISTEN_PORT}")
+            servers.append((label, make_server(addr)))
         except Exception as e:
             print(f"  could not bind {label}:{LISTEN_PORT}: {e}")
-    if not started:
+            if isinstance(e, OSError) and e.errno == errno.EADDRINUSE:
+                in_use = True
+    if in_use:
+        # Another program is serving that address; clients reaching it would get that
+        # program instead of us, so don't run half-shadowed.
+        print(f"  FATAL: port {LISTEN_PORT} is already in use by another program"
+              " (an older proxy still running?)")
+        sys.exit(1)
+    if not servers:
         print("  FATAL: could not bind any address")
         sys.exit(1)
+    started = []
+    for label, srv in servers:
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        started.append(t)
+        print(f"  listening on {label}:{LISTEN_PORT}")
     print("  ready. Ctrl+C to stop.")
     try:
         for t in started:
